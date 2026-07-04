@@ -5,7 +5,11 @@ Api
 import http.client
 import json
 import logging
+import os
 import sys
+import time
+
+TOKEN_CACHE = "token.cache"
 
 
 class SolarmanApi:
@@ -24,6 +28,17 @@ class SolarmanApi:
             self.config["passhash"],
         )
         self.station_realtime = self.get_station_realtime()
+        if self.station_realtime.get("success") is False and "token" in str(
+            self.station_realtime.get("msg", "")
+        ).lower():
+            logging.error(
+                "Cached token rejected, removing cache: %s", self.station_realtime
+            )
+            try:
+                os.remove(TOKEN_CACHE)
+            except OSError:
+                pass
+            sys.exit(1)
         self.device_current_data_inverter = self.get_device_current_data(
             self.config["inverterId"]
         )
@@ -40,9 +55,17 @@ class SolarmanApi:
 
     def get_token(self, appid, secret, username, passhash):
         """
-        Get a token from the API
+        Get a token from the API, cached in token.cache between runs
         :return: access_token
         """
+        try:
+            with open(TOKEN_CACHE) as file:
+                cached = json.load(file)
+            if time.time() < cached["expires_at"] - 86400:
+                logging.debug("Using cached token")
+                return cached["access_token"]
+        except (OSError, ValueError, KeyError):
+            pass
         try:
             conn = http.client.HTTPSConnection(self.url, timeout=60)
             payload = json.dumps(
@@ -53,6 +76,18 @@ class SolarmanApi:
             conn.request("POST", url, payload, headers)
             res = conn.getresponse()
             data = json.loads(res.read())
+            if "access_token" not in data:
+                logging.error("Token request refused by API: %s", data)
+                sys.exit(1)
+            with open(TOKEN_CACHE, "w") as file:
+                json.dump(
+                    {
+                        "access_token": data["access_token"],
+                        "expires_at": time.time()
+                        + int(float(data.get("expires_in", 0))),
+                    },
+                    file,
+                )
             logging.debug("Received token")
             return data["access_token"]
         except Exception as error:  # pylint: disable=broad-except
